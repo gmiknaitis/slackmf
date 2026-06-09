@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # <swiftbar.title>Slack Status</swiftbar.title>
-# <swiftbar.version>1.1</swiftbar.version>
+# <swiftbar.version>1.2</swiftbar.version>
 # <swiftbar.desc>Shows unread DMs and channel mentions</swiftbar.desc>
 # <swiftbar.hideAbout>true</swiftbar.hideAbout>
 # <swiftbar.hideRunInTerminal>true</swiftbar.hideRunInTerminal>
@@ -9,20 +9,63 @@
 
 import json
 import os
+import sys
+import time
 import urllib.request
 from pathlib import Path
 
-TOKEN_FILE = Path.home() / ".config" / "slack-menubar" / "token"
+CONFIG_DIR = Path.home() / ".config" / "slack-menubar"
+TOKEN_FILE = CONFIG_DIR / "token"
+CONFIG_FILE = CONFIG_DIR / "config.json"
+CACHE_FILE = CONFIG_DIR / "cache.json"
+SCRIPT_PATH = Path(__file__).resolve()
 
 CLEAR_SYMBOL = "·"
 ERROR_SYMBOL = "⚡"
 OPEN_SLACK = "bash=open param1=-a param2=Slack terminal=false"
+
+DEFAULT_INTERVAL = 60
+INTERVALS = [
+    (30, "30 seconds"),
+    (60, "1 minute"),
+    (120, "2 minutes"),
+    (300, "5 minutes"),
+]
 
 
 def get_token():
     if TOKEN_FILE.exists():
         return TOKEN_FILE.read_text().strip()
     return os.environ.get("SLACK_TOKEN", "")
+
+
+def load_config():
+    try:
+        return json.loads(CONFIG_FILE.read_text())
+    except Exception:
+        return {"interval": DEFAULT_INTERVAL}
+
+
+def save_config(config):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text(json.dumps(config))
+
+
+def load_cache():
+    try:
+        return json.loads(CACHE_FILE.read_text())
+    except Exception:
+        return None
+
+
+def save_cache(dm_unreads, channel_unreads, mention_count):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    CACHE_FILE.write_text(json.dumps({
+        "dm_unreads": dm_unreads,
+        "channel_unreads": channel_unreads,
+        "mention_count": mention_count,
+        "fetched_at": time.time(),
+    }))
 
 
 def slack_get(method, token, **params):
@@ -64,7 +107,16 @@ def fetch_counts(token):
     return dm_unreads, channel_unreads, mention_count
 
 
+if len(sys.argv) == 3 and sys.argv[1] == "--set-interval":
+    config = load_config()
+    config["interval"] = int(sys.argv[2])
+    save_config(config)
+    sys.exit(0)
+
+
 token = get_token()
+config = load_config()
+interval = config.get("interval", DEFAULT_INTERVAL)
 
 if not token:
     print("Slack: no token")
@@ -74,9 +126,17 @@ if not token:
     raise SystemExit(0)
 
 try:
-    dm_unreads, channel_unreads, mention_count = fetch_counts(token)
+    cache = load_cache()
+    now = time.time()
 
-    # mention_count (unread_count_display) is a subset of channel_unreads (unread_count)
+    if cache and (now - cache.get("fetched_at", 0)) < interval:
+        dm_unreads = cache["dm_unreads"]
+        channel_unreads = cache["channel_unreads"]
+        mention_count = cache["mention_count"]
+    else:
+        dm_unreads, channel_unreads, mention_count = fetch_counts(token)
+        save_cache(dm_unreads, channel_unreads, mention_count)
+
     other_channel = max(0, channel_unreads - mention_count)
 
     parts = []
@@ -98,6 +158,11 @@ try:
         print(f"Channels: {other_channel} unread")
     if not dm_unreads and not channel_unreads:
         print("All clear")
+    print("---")
+    print("Refresh interval")
+    for secs, label in INTERVALS:
+        check = " ✓" if secs == interval else ""
+        print(f"-- {label}{check} | bash={SCRIPT_PATH} param1=--set-interval param2={secs} terminal=false refresh=true")
     print("---")
     print(f"Open Slack | {OPEN_SLACK}")
     print("Refresh | refresh=true")
